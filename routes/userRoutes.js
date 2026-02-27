@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const User = require('../models/users');
 const CivilRegistry = require('../models/CivilRegistry');
+const Notification = require('../models/Notification'); 
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const { authenticateToken } = require('../middleware/auth'); 
@@ -268,7 +269,6 @@ router.get('/get-user/:userId', async (req, res) => {
     }
 });
 
-
 router.get('/profile', authenticateToken, async (req, res) => {
     try {
         const user = await User.findById(req.user.id).select('-password -loginOtp');
@@ -320,5 +320,58 @@ router.put('/update-profile', authenticateToken, async (req, res) => {
         res.status(500).json({ message: 'حدث خطأ في الخادم' });
     }
 });
+//////////
+router.get('/notifications', authenticateToken, async (req, res) => {
+    try {
+        const notifications = await Notification.find({ userId: req.user.id })
+            .populate('contractId', 'contractNumber propertyType')
+            .sort('-createdAt');
+        
+        const unreadCount = await Notification.countDocuments({ 
+            userId: req.user.id, 
+            isRead: false 
+        });
+        
+        res.json({
+            notifications,
+            unreadCount
+        });
+    } catch (error) {
+        console.error('Error fetching notifications:', error);
+        res.status(500).json({ message: 'Server error' });
+    }
+});
 
+router.put('/notifications/:notificationId/read', authenticateToken, async (req, res) => {
+    try {
+        const notification = await Notification.findOneAndUpdate(
+            { _id: req.params.notificationId, userId: req.user.id },
+            { isRead: true, readAt: Date.now() },
+            { new: true }
+        );
+        
+        if (!notification) {
+            return res.status(404).json({ message: 'Notification not found' });
+        }
+        
+        res.json({ notification });
+    } catch (error) {
+        console.error('Error marking notification as read:', error);
+        res.status(500).json({ message: 'Server error' });
+    }
+});
+
+router.put('/notifications/read-all', authenticateToken, async (req, res) => {
+    try {
+        await Notification.updateMany(
+            { userId: req.user.id, isRead: false },
+            { isRead: true, readAt: Date.now() }
+        );
+        
+        res.json({ message: 'All notifications marked as read' });
+    } catch (error) {
+        console.error('Error marking all notifications as read:', error);
+        res.status(500).json({ message: 'Server error' });
+    }
+});
 module.exports = router;
