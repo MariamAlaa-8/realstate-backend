@@ -9,7 +9,6 @@ const contractSchema = new mongoose.Schema({
     contractNumber: {
         type: String,
         unique: true,
-       
     },
     fullName: {
         type: String,
@@ -78,10 +77,17 @@ const contractSchema = new mongoose.Schema({
     
     status: {
         type: String,
-        enum: ['pending', 'approved', 'rejected', 'completed'],
+        enum: [
+            'pending',     
+            'approved',     
+            'rejected',    
+            'for_sale',     
+            'sale_pending', 
+            'sold',          
+            'completed'     
+        ],
         default: 'pending'
     },
-    
     notes: {
         type: String
     },
@@ -94,11 +100,11 @@ const contractSchema = new mongoose.Schema({
         type: Date
     },
 
-    imagePath: {
+    contractImage: {
         type: String, 
         required: false
     },
-    imageUrl: {
+    imageType: {
         type: String,
         required: false
     },
@@ -106,6 +112,42 @@ const contractSchema = new mongoose.Schema({
         type: String, 
         required: false
     }
+    ,
+
+        //  للبيع
+    buyerId: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'User'
+    },
+    salePrice: {
+        type: Number
+    },
+    saleDate: {
+        type: Date
+    },
+    paymentStatus: {
+        type: String,
+        enum: ['pending', 'paid', 'confirmed'],
+        default: 'pending'
+    },
+    paymentMethod: {
+        type: String,
+        enum: ['bank_transfer', 'cash'],
+        required: false
+    },
+    pendingSale: {
+        type: Boolean,
+        default: false
+    },
+    pendingBuyerId: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'User'
+    },
+    pendingTransactionId: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'Transaction'
+    },
+
 }, { 
     timestamps: true,
     toJSON: { virtuals: true },
@@ -127,14 +169,12 @@ contractSchema.pre('save', async function() {
     console.log('✅ Generated:', this.contractNumber);
 });
 
-// Virtual for formatted price
 contractSchema.virtual('formattedPrice').get(function() {
-    return this.price ? this.price.toLocaleString('ar-EG') + ' جنيه' : '';
+    return this.price ? this.price.toLocaleString('ar-EG') + ' جنيه' : 'غير محدد';
 });
 
-// Virtual for formatted area
 contractSchema.virtual('formattedArea').get(function() {
-    return this.area ? this.area.toLocaleString('ar-EG') + ' م²' : '';
+    return this.area ? this.area.toLocaleString('ar-EG') + ' م²' : 'غير محدد';
 });
 
 module.exports = mongoose.model('Contract', contractSchema);
