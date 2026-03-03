@@ -74,6 +74,14 @@ router.post('/create', authenticateToken, upload.single('contractImage'), async 
             });
         }
 
+        // ✅ التحقق من وجود الصورة (مطلوبة الآن)
+        if (!req.file) {
+            console.log('❌ No image uploaded');
+            return res.status(400).json({ 
+                message: "صورة العقد مطلوبة" 
+            });
+        }
+
         const contractData = {
             userId: req.user.id,
             fullName,
@@ -89,41 +97,38 @@ router.post('/create', authenticateToken, upload.single('contractImage'), async 
             price,
             area,
             notes: notes || '',
-            status: 'pending'
+            status: 'pending',
+            // ✅ استخدام contractImage بدلاً من imagePath
+            contractImage: `http://localhost:5000/${req.file.path.replace(/\\/g, '/')}`,
+            imageType: req.file.mimetype,
+            imageName: req.file.originalname
         };
-
-        if (req.file) {
-            contractData.imagePath = req.file.path.replace(/\\/g, '/');
-            contractData.imageUrl = `http://localhost:5000/${req.file.path.replace(/\\/g, '/')}`;
-            contractData.imageName = req.file.originalname;
-
-            
-            console.log('✅ Image saved:', contractData.imagePath);
-        }
 
         const contract = new Contract(contractData);
         await contract.save();
+        
         try {
-        const admin = await User.findOne({ role: 'admin' });
-        if (admin) {
-            const notification = new Notification({
-                userId: admin._id,
-                type: 'general',
-                title: 'طلب إثبات ملكية جديد',
-                message: `تم تقديم طلب جديد من ${fullName} - نوع العقار: ${propertyType}`,
-                contractId: contract._id,
-                data: { 
-                    userName: fullName, 
-                    propertyType,
-                    propertyNumber 
-                }
-            });
-            await notification.save();
-            console.log('✅ Admin notification created');
-        }
+            const admin = await User.findOne({ role: 'admin' });
+            if (admin) {
+                const notification = new Notification({
+                    userId: admin._id,
+                    type: 'general',
+                    title: 'طلب إثبات ملكية جديد',
+                    message: `تم تقديم طلب جديد من ${fullName} - نوع العقار: ${propertyType}`,
+                    contractId: contract._id,
+                    data: { 
+                        userName: fullName, 
+                        propertyType,
+                        propertyNumber 
+                    }
+                });
+                await notification.save();
+                console.log('✅ Admin notification created');
+            }
         } catch (notifError) {
             console.error('❌ Error creating admin notification:', notifError);
         }
+        
         await User.findByIdAndUpdate(req.user.id, {
             $push: { contracts: contract._id },
             lastActivity: Date.now()
@@ -148,7 +153,6 @@ router.post('/create', authenticateToken, upload.single('contractImage'), async 
 
 router.get('/my-contracts', authenticateToken, async (req, res) => {
     try {
-        
         const contracts = await Contract.find({ userId: req.user.id })
             .sort('-createdAt'); 
         
@@ -160,7 +164,8 @@ router.get('/my-contracts', authenticateToken, async (req, res) => {
             contracts: contracts.map(contract => ({
                 ...contract.toObject(),
                 formattedPrice: contract.formattedPrice,
-                formattedArea: contract.formattedArea
+                formattedArea: contract.formattedArea,
+                imageUrl: contract.contractImage // 
             }))
         });
     } catch (error) {
@@ -210,6 +215,7 @@ router.get('/my-for-sale', authenticateToken, async (req, res) => {
         res.status(500).json({ message: 'Server error' });
     }
 });
+
 router.get('/check/:contractNumber', authenticateToken, async (req, res) => {
     try {
         const { contractNumber } = req.params;
@@ -342,6 +348,64 @@ router.post('/:contractId/initiate-sale', authenticateToken, async (req, res) =>
     }
 });
 
+router.put('/:contractId/for-sale', authenticateToken, async (req, res) => {
+    try {
+        const { contractId } = req.params;
+        const { salePrice } = req.body;
+        
+        console.log('📤 Updating contract to for-sale:', contractId);
+        
+        const contract = await Contract.findOne({
+            _id: contractId,
+            userId: req.user.id
+        });
+        
+        if (!contract) {
+            console.log('❌ Contract not found for user');
+            return res.status(404).json({ message: 'Contract not found or not owned by you' });
+        }
+        
+        if (contract.status !== 'approved' && contract.status !== 'completed') {
+            console.log('❌ Invalid contract status:', contract.status);
+            return res.status(400).json({ 
+                message: 'Contract must be approved or completed first',
+                currentStatus: contract.status 
+            });
+        }
+        
+        contract.status = 'for_sale';
+        contract.salePrice = salePrice || contract.price;
+        await contract.save();
+        
+        console.log('✅ Contract updated to for_sale:', contract.contractNumber);
+        
+        const admin = await User.findOne({ role: 'admin' });
+        if (admin) {
+            const notification = new Notification({
+                userId: admin._id,
+                type: 'general',
+                title: 'عرض جديد للبيع',
+                message: `تم عرض عقار ${contract.propertyType} للبيع بسعر ${(salePrice || contract.price).toLocaleString()} جنيه`,
+                contractId: contract._id,
+                data: { sellerName: contract.fullName }
+            });
+            await notification.save();
+        }
+        
+        res.json({
+            message: 'Contract updated to for sale successfully',
+            contract: {
+                ...contract.toObject(),
+                formattedPrice: contract.formattedPrice,
+                formattedArea: contract.formattedArea
+            }
+        });
+    } catch (error) {
+        console.error('Error updating contract to for sale:', error);
+        res.status(500).json({ message: 'Server error' });
+    }
+});
+
 router.put('/:contractNumber/update-for-sale', authenticateToken, async (req, res) => {
     try {
         const { contractNumber } = req.params;
@@ -391,8 +455,6 @@ router.put('/:contractNumber/update-for-sale', authenticateToken, async (req, re
     }
 });
 
-
-
 router.put('/:contractId/cancel-payment', authenticateToken, async (req, res) => {
     try {
         const { contractId } = req.params;
@@ -428,4 +490,5 @@ router.put('/:contractId/cancel-payment', authenticateToken, async (req, res) =>
         res.status(500).json({ message: 'Server error' });
     }
 });
+
 module.exports = router;
