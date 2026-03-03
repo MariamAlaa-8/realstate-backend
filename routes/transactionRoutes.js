@@ -152,7 +152,7 @@ router.put('/:transactionId/confirm', authenticateToken, async (req, res) => {
             userId: transaction.buyerId._id,
             type: 'contract_approved',
             title: 'تم اكتمال عملية الشراء',
-            message: `تم تأكيد استلام الفلوس وأصبح العقار ملكك الآن`,
+            message: `تم تأكيد استلام الفلوس وأصبح العقار ملكك الآن. هيتم استلام كارت الملكية بعد يومين`,
             contractId: buyerContract._id,
             data: { transactionId: transaction._id }
         });
