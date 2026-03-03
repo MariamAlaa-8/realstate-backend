@@ -374,4 +374,25 @@ router.put('/notifications/read-all', authenticateToken, async (req, res) => {
         res.status(500).json({ message: 'Server error' });
     }
 });
+router.delete('/notifications/:notificationId', authenticateToken, async (req, res) => {
+    console.log('DELETE notification route hit!');
+    console.log('Notification ID:', req.params.notificationId);
+    console.log('User ID:', req.user.id);
+    
+    try {
+        const notification = await Notification.findOneAndDelete({
+            _id: req.params.notificationId,
+            userId: req.user.id
+        });
+        
+        if (!notification) {
+            return res.status(404).json({ message: 'Notification not found' });
+        }
+        
+        res.json({ message: 'Notification deleted successfully' });
+    } catch (error) {
+        console.error('Error deleting notification:', error);
+        res.status(500).json({ message: 'Server error' });
+    }
+});
 module.exports = router;
