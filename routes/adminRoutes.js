@@ -17,7 +17,6 @@ const authenticateAdmin = async (req, res, next) => {
     }
 };
 
-
 router.get('/dashboard' ,authenticateToken, authenticateAdmin, async (req, res) => {
     try {
         const thirtyDaysAgo = new Date();
@@ -29,36 +28,44 @@ router.get('/dashboard' ,authenticateToken, authenticateAdmin, async (req, res) 
         const completedContracts = await Contract.countDocuments({ status: 'completed' });
         
         const totalUsers = await User.countDocuments({ role: 'user' });
+        
         const activeUsers = await User.countDocuments({ 
             role: 'user', 
-            lastActivity: { $gte: thirtyDaysAgo } 
+            lastActivity: { $gte: thirtyDaysAgo },
+            isALive: true 
         });
+        
         const inactiveUsers = totalUsers - activeUsers;
         
         const users = await User.find({ role: 'user' })
-            .select('fullName phoneNumber nationalId lastActivity createdAt contracts isActive')
+            .select('fullName phoneNumber nationalId lastActivity createdAt contracts isActive isALive')
             .lean();
         
         const usersWithContracts = await Promise.all(users.map(async (user) => {
             const contracts = await Contract.find({ userId: user._id })
-                .select('contractNumber propertyType price status createdAt')
+                .select('contractNumber propertyType price status createdAt contractImage imageName')
                 .sort('-createdAt');
+            
+            const isInactive = user.lastActivity < thirtyDaysAgo || !user.isALive;
             
             return {
                 ...user,
                 contracts,
                 contractCount: contracts.length,
-                inactive: user.lastActivity < thirtyDaysAgo
+                inactive: isInactive,
+                inactiveReason: !user.isALive ? 'deceased' : (user.lastActivity < thirtyDaysAgo ? 'inactive' : 'active')
             };
         }));
         
         const recentContracts = await Contract.find()
             .populate('userId', 'fullName phoneNumber')
+            .select('contractNumber propertyType price status createdAt contractImage imageName')
             .sort('-createdAt')
             .limit(10);
         
         const pendingContractsList = await Contract.find({ status: 'pending' })
             .populate('userId', 'fullName phoneNumber')
+            .select('contractNumber propertyType price status createdAt contractImage imageName fullName phoneNumber formattedPrice formattedArea')
             .sort('-createdAt')
             .limit(20);
         
@@ -85,11 +92,40 @@ router.get('/dashboard' ,authenticateToken, authenticateAdmin, async (req, res) 
     }
 });
 
+// isALive 
+router.put('/user/:userId/status', authenticateToken, authenticateAdmin, async (req, res) => {
+    try {
+        const { userId } = req.params;
+        const { isALive } = req.body;
+        
+        const user = await User.findById(userId);
+        
+        if (!user) {
+            return res.status(404).json({ message: 'User not found' });
+        }
+        
+        user.isALive = isALive;
+        await user.save();
+        
+        res.json({
+            message: `User status updated to ${isALive ? 'alive' : 'inactive'}`,
+            user: {
+                id: user._id,
+                fullName: user.fullName,
+                isALive: user.isALive
+            }
+        });
+    } catch (error) {
+        console.error('Error updating user status:', error);
+        res.status(500).json({ message: 'Server error' });
+    }
+});
 
 router.get('/contracts/pending', authenticateToken, authenticateAdmin, async (req, res) => {
     try {
         const contracts = await Contract.find({ status: 'pending' })
             .populate('userId', 'fullName phoneNumber nationalId')
+            .select('contractNumber propertyType price status createdAt contractImage imageName fullName phoneNumber formattedPrice formattedArea')
             .sort('-createdAt');
         
         res.json({
@@ -101,7 +137,6 @@ router.get('/contracts/pending', authenticateToken, authenticateAdmin, async (re
         res.status(500).json({ message: 'Server error' });
     }
 });
-
 router.get('/contracts', authenticateToken, authenticateAdmin, async (req, res) => {
     try {
         const { status, userId, fromDate, toDate } = req.query;
@@ -118,6 +153,7 @@ router.get('/contracts', authenticateToken, authenticateAdmin, async (req, res) 
         
         const contracts = await Contract.find(query)
             .populate('userId', 'fullName phoneNumber nationalId')
+            .select('contractNumber propertyType price status createdAt contractImage imageName')
             .sort('-createdAt');
         
         res.json({
@@ -155,7 +191,7 @@ router.put('/contracts/:contractId/accept', authenticateToken, authenticateAdmin
             userId: contract.userId._id,
             type: 'contract_approved',
             title: 'تم الموافقة على العقد',
-            message: `تمت الموافقة على العقد رقم ${contract.contractNumber} بنجاح`,
+            message: `تمت الموافقة على العقد رقم ${contract.contractNumber} بنجاح. هيتم استلام كارت الملكية بعد يومين`,
             contractId: contract._id,
             isRead: false
         });
@@ -239,7 +275,8 @@ router.get('/contracts/:contractId', authenticateToken, authenticateAdmin, async
         const { contractId } = req.params;
         
         const contract = await Contract.findById(contractId)
-            .populate('userId', 'fullName phoneNumber nationalId email createdAt lastActivity');
+            .populate('userId', 'fullName phoneNumber nationalId email createdAt lastActivity')
+            .select('+contractImage +imageName');
         
         if (!contract) {
             return res.status(404).json({ message: 'Contract not found' });
@@ -404,12 +441,14 @@ router.get('/users', authenticateToken, authenticateAdmin, async (req, res) => {
             .select('-password -loginOtp -forgotPasswordOtp -verificationCode')
             .sort('-createdAt');
         
+        const thirtyDaysAgo = new Date();
+        thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+        
         const usersWithStats = await Promise.all(users.map(async (user) => {
             const contracts = await Contract.find({ userId: user._id })
                 .select('status createdAt');
             
-            const thirtyDaysAgo = new Date();
-            thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+            const isInactive = user.lastActivity < thirtyDaysAgo || !user.isALive;
             
             return {
                 ...user.toObject(),
@@ -418,7 +457,7 @@ router.get('/users', authenticateToken, authenticateAdmin, async (req, res) => {
                 approvedCount: contracts.filter(c => c.status === 'approved').length,
                 rejectedCount: contracts.filter(c => c.status === 'rejected').length,
                 completedCount: contracts.filter(c => c.status === 'completed').length,
-                isInactive: user.lastActivity < thirtyDaysAgo,
+                inactive: isInactive,
                 daysSinceLastActivity: Math.floor((Date.now() - user.lastActivity) / (1000 * 60 * 60 * 24))
             };
         }));
@@ -553,7 +592,7 @@ router.delete('/user/:userId', authenticateToken, authenticateAdmin, async (req,
 router.get('/user-activity/:userId', authenticateToken, authenticateAdmin, async (req, res) => {
     try {
         const user = await User.findById(req.params.userId)
-            .select('fullName phoneNumber nationalId lastActivity createdAt contracts isActive');
+            .select('fullName phoneNumber nationalId lastActivity createdAt contracts isActive isALive');
         
         if (!user) {
             return res.status(404).json({ message: 'User not found' });
