@@ -1,180 +1,58 @@
 const mongoose = require('mongoose');
 
-const contractSchema = new mongoose.Schema({
-    userId: {
-        type: mongoose.Schema.Types.ObjectId,
-        ref: 'User',
-        required: true
-    },
-    contractNumber: {
+const userSchema = new mongoose.Schema({
+    fullName: { type: String, required: true },
+    password: { type: String, required: true },
+    phoneNumber: { type: String, required: true, unique: true },
+    nationalId: { type: String, required: true, unique: true },
+    isPhoneVerified: { type: Boolean, default: false },
+    isNationalIdVerified: { type: Boolean, default: false },
+    verificationCode: { type: String },
+    forgotPasswordOtp: {
         type: String,
-        unique: true,
+        default: null
     },
-    fullName: {
+    forgotPasswordOtpExpires: {
+        type: Date,
+        default: null
+    },
+    loginOtp: {
         type: String,
-        required: true
+        default: null
     },
-    nationalId: {
-        type: String,
-        required: true
+    otpExpires: {
+        type: Date,
+        default: null
     },
-    phoneNumber: {
-        type: String,
-        required: true
+    role: { 
+        type: String, 
+        enum: ['user', 'admin'], 
+        default: 'user' 
     },
-    
-    propertyNumber: {
-        type: String,
-        required: true
-    },
-    ownershipPercentage: {
-        type: Number,
-        required: true,
-        min: 0,
-        max: 100
-    },
-    address: {
-        type: String,
-        required: true
-    },
-    governorate: {
-        type: String,
-        required: true,
-        enum: [
-            'القاهرة', 'الجيزة', 'الإسكندرية', 'الدقهلية', 'البحر الأحمر',
-            'البحيرة', 'الفيوم', 'الغربية', 'الإسماعيلية', 'المنوفية',
-            'المنيا', 'القليوبية', 'الوادي الجديد', 'السويس', 'اسوان',
-            'اسيوط', 'بني سويف', 'بورسعيد', 'دمياط', 'الشرقية',
-            'جنوب سيناء', 'كفر الشيخ', 'مطروح', 'الأقصر', 'قنا',
-            'شمال سيناء', 'سوهاج'
-        ]
-    },
-    propertyType: {
-        type: String,
-        required: true
-    },
-    propertyCategory: {
-        type: String,
-        enum: ['سكني', 'تجاري / إداري', 'أراضي', 'صناعي'],
-        required: true
-    },
-    floor: {
-        type: String,
-        required: function() {
-            return ['شقة', 'دوبلكس', 'ستوديو', 'بنتهاوس', 'مكتب إداري', 'عيادة'].includes(this.propertyType);
-        }
-    },
-    price: {
-        type: Number,
-        required: true,
-        min: 0
-    },
-    area: {
-        type: Number,
-        required: true,
-        min: 0
-    },
-    
-    status: {
-        type: String,
-        enum: [
-            'pending',     
-            'approved',     
-            'rejected',    
-            'for_sale',     
-            'sale_pending', 
-            'sold',          
-            'completed'     
-        ],
-        default: 'pending'
-    },
-    notes: {
-        type: String
-    },
-    
-    contractDate: {
+    lastActivity: {
         type: Date,
         default: Date.now
     },
-    expiryDate: {
-        type: Date
-    },
-
-    contractImage: {
-        type: String, 
-        required: false
-    },
-    imageType: {
-        type: String,
-        required: false
-    },
-    imageName: {
-        type: String, 
-        required: false
-    }
-    ,
-
-        //  للبيع
-    buyerId: {
-        type: mongoose.Schema.Types.ObjectId,
-        ref: 'User'
-    },
-    salePrice: {
-        type: Number
-    },
-    saleDate: {
-        type: Date
-    },
-    paymentStatus: {
-        type: String,
-        enum: ['pending', 'paid', 'confirmed'],
-        default: 'pending'
-    },
-    paymentMethod: {
-        type: String,
-        enum: ['bank_transfer', 'cash'],
-        required: false
-    },
-    pendingSale: {
+    isActive: {
         type: Boolean,
-        default: false
+        default: true
     },
-    pendingBuyerId: {
+    isALive : {
+        type: Boolean,
+        default: true
+    },
+    contracts: [{
         type: mongoose.Schema.Types.ObjectId,
-        ref: 'User'
-    },
-    pendingTransactionId: {
-        type: mongoose.Schema.Types.ObjectId,
-        ref: 'Transaction'
-    },
+        ref: 'Contract'
+    }],
+    isTempUser: {
+    type: Boolean,
+    default: false },
+}, { timestamps: true });
 
-}, { 
-    timestamps: true,
-    toJSON: { virtuals: true },
-    toObject: { virtuals: true }
-});
+userSchema.methods.updateActivity = function() {
+    this.lastActivity = Date.now();
+    return this.save();
+};
 
-contractSchema.pre('save', async function() {
-    if (this.contractNumber) return;
-
-    console.log('📝 Generating contract number...');
-    
-    const date = new Date();
-    const year = date.getFullYear().toString().slice(-2);
-    const month = (date.getMonth() + 1).toString().padStart(2, '0');
-    const random = Math.floor(Math.random() * 1000000).toString().padStart(6, '0');
-    
-    this.contractNumber = `CON-${year}${month}-${random}`;
-    
-    console.log('✅ Generated:', this.contractNumber);
-});
-
-contractSchema.virtual('formattedPrice').get(function() {
-    return this.price ? this.price.toLocaleString('ar-EG') + ' جنيه' : 'غير محدد';
-});
-
-contractSchema.virtual('formattedArea').get(function() {
-    return this.area ? this.area.toLocaleString('ar-EG') + ' م²' : 'غير محدد';
-});
-
-module.exports = mongoose.model('Contract', contractSchema);
+module.exports = mongoose.models.User || mongoose.model('User', userSchema);
