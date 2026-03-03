@@ -102,7 +102,7 @@ const contractSchema = new mongoose.Schema({
 
     contractImage: {
         type: String, 
-        required: false
+        required: true
     },
     imageType: {
         type: String,
@@ -114,7 +114,6 @@ const contractSchema = new mongoose.Schema({
     }
     ,
 
-        //  للبيع
     buyerId: {
         type: mongoose.Schema.Types.ObjectId,
         ref: 'User'
