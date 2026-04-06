@@ -5,6 +5,7 @@ const User = require('../models/users');
 const Notification = require('../models/Notification');
 const { authenticateToken } = require('../middleware/auth');
 const Transaction = require('../models/Transaction'); 
+const Zamam = require('../models/Zamam');
 const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
@@ -50,19 +51,11 @@ router.post('/create', authenticateToken, upload.single('contractImage'), async 
         console.log('Uploaded file:', req.file); 
 
         const {
-            fullName,
-            nationalId,
-            phoneNumber,
-            propertyNumber,
-            ownershipPercentage,
-            address,
-            governorate,
-            propertyType,
-            propertyCategory,
-            floor,
-            price,
-            area,
-            notes
+            fullName, nationalId, phoneNumber, propertyNumber,
+            ownershipPercentage, address, governorate, propertyType,
+            propertyCategory, floor, price, area, notes,
+            zamamNumber,    
+            zamamShare       
         } = req.body;
 
         if (!fullName || !nationalId || !phoneNumber || !propertyNumber || 
@@ -74,7 +67,6 @@ router.post('/create', authenticateToken, upload.single('contractImage'), async 
             });
         }
 
-        // ✅ التحقق من وجود الصورة (مطلوبة الآن)
         if (!req.file) {
             console.log('❌ No image uploaded');
             return res.status(400).json({ 
@@ -84,25 +76,37 @@ router.post('/create', authenticateToken, upload.single('contractImage'), async 
 
         const contractData = {
             userId: req.user.id,
-            fullName,
-            nationalId,
-            phoneNumber,
-            propertyNumber,
-            ownershipPercentage,
-            address,
-            governorate,
-            propertyType,
-            propertyCategory,
-            floor: floor || undefined,
-            price,
-            area,
-            notes: notes || '',
+            fullName, nationalId, phoneNumber, propertyNumber,
+            ownershipPercentage, address, governorate, propertyType,
+            propertyCategory, floor, price, area, notes,
+            zamamNumber, zamamShare,
             status: 'pending',
-            // ✅ استخدام contractImage بدلاً من imagePath
             contractImage: `http://localhost:5000/${req.file.path.replace(/\\/g, '/')}`,
             imageType: req.file.mimetype,
             imageName: req.file.originalname
         };
+
+        if (propertyType === 'أرض زراعية') {
+            if (!zamamNumber || !zamamShare) {
+                return res.status(400).json({ message: 'رقم الزمام والمساحة المملوكة مطلوبان للأراضي الزراعية' });
+            }
+
+            const zamam = await Zamam.findOne({ zamamNumber });
+            if (!zamam) return res.status(400).json({ message: 'رقم الزمام غير معروف' });
+
+            const zamamShareNum = parseFloat(zamamShare);
+            if (isNaN(zamamShareNum) || zamamShareNum <= 0) {
+                return res.status(400).json({ message: 'المساحة المملوكة يجب أن تكون رقماً موجباً' });
+            }
+            if (zamam.ownedArea == 100) {
+                return res.status(400).json({ message: 'هذا الزمام مملوك بالكامل بالفعل، لا يمكن إضافة ملكية جديدة' });
+            }
+
+            contractData.zamamId = zamam._id;
+            contractData.zamamShare = zamamShareNum; 
+            contractData.ownershipPercentage = ownershipPercentage; 
+            contractData.isZamamContract = true;
+        }
 
         const contract = new Contract(contractData);
         await contract.save();
@@ -154,23 +158,50 @@ router.post('/create', authenticateToken, upload.single('contractImage'), async 
 router.get('/my-contracts', authenticateToken, async (req, res) => {
     try {
         const contracts = await Contract.find({ userId: req.user.id })
-            .sort('-createdAt'); 
+            .populate('zamamId')   
+            .sort('-createdAt');
         
         await User.findByIdAndUpdate(req.user.id, {
             lastActivity: Date.now()
         });
 
-        res.json({
+    res.json({
             contracts: contracts.map(contract => ({
                 ...contract.toObject(),
                 formattedPrice: contract.formattedPrice,
                 formattedArea: contract.formattedArea,
-                imageUrl: contract.contractImage // 
+                imageUrl: contract.contractImage,
+                zamamDetails: contract.zamamId ? {
+                    zamamNumber: contract.zamamId.zamamNumber,
+                    totalArea: contract.zamamId.totalArea,
+                    zamamShare: contract.zamamShare,
+                    percentageOfZamam: ((contract.zamamShare / contract.zamamId.totalArea) * 100).toFixed(2) + '%'
+                } : null
             }))
         });
     } catch (error) {
         console.error('❌ Get contracts error:', error);
         res.status(500).json({ message: 'حدث خطأ في الخادم' });
+    }
+});
+router.get('/check-zamam/:zamamNumber', authenticateToken, async (req, res) => {
+    try {
+        const zamam = await Zamam.findOne({ zamamNumber: req.params.zamamNumber });
+        if (!zamam) return res.status(404).json({ message: 'رقم الزمام غير موجود' });
+
+        const remainingPercentage = 100 - zamam.ownedArea; 
+        const remainingArea = (remainingPercentage / 100) * zamam.totalArea;
+
+        res.json({
+            zamamNumber: zamam.zamamNumber,
+            totalArea: zamam.totalArea,
+            ownedArea: zamam.ownedArea,           
+            remainingArea: remainingArea,         
+            governorate: zamam.governorate,
+            description: zamam.description
+        });
+    } catch (error) {
+        res.status(500).json({ message: 'خطأ في الخادم' });
     }
 });
 
