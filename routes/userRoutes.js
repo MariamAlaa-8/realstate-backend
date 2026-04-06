@@ -2,56 +2,241 @@ const express = require('express');
 const router = express.Router();
 const User = require('../models/users');
 const CivilRegistry = require('../models/CivilRegistry');
+const FamilyMember = require('../models/FamilyMember');
 const Notification = require('../models/Notification'); 
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const { authenticateToken } = require('../middleware/auth'); 
 
 router.post('/register', async (req, res) => {
-    const { fullName, password, confirmPassword, nationalId, phoneNumber } = req.body;
-    
-    if (!fullName || !password || !confirmPassword || !nationalId || !phoneNumber) {
-        return res.status(400).json({ 
-            message: "جميع الحقول مطلوبة" 
+    try {
+        const {
+            fullName, password, confirmPassword, nationalId,
+            phoneNumber, gender, nationality, religion,
+            region, familyMembers
+        } = req.body;
+
+        if (!fullName || !password || !confirmPassword || !nationalId || !phoneNumber) {
+            return res.status(400).json({ message: "جميع الحقول المطلوبة يجب ملؤها" });
+        }
+
+        if (!religion) {
+            return res.status(400).json({ message: "يرجى تحديد الديانة" });
+        }
+
+        if (password !== confirmPassword) {
+            return res.status(400).json({ message: "كلمات المرور غير متطابقة" });
+        }
+
+        const existingPhone = await User.findOne({ phoneNumber, isTempUser: false });
+        if (existingPhone) {
+            return res.status(400).json({ message: "رقم الهاتف مستخدم بالفعل" });
+        }
+
+        const hashedPassword = await bcrypt.hash(password, 10);
+        const verificationCode = Math.floor(100000 + Math.random() * 900000).toString();
+
+        const user = new User({
+            fullName, password: hashedPassword, phoneNumber, nationalId,
+            gender, nationality, religion, region,   
+            verificationCode, isAlive: true, isTempUser: false
         });
-    }
 
-    if (password !== confirmPassword) return res.status(400).json({ message: "كلمات المرور غير متطابقة" });
+        await user.save();
 
-    const existingUser = await User.findOne({ $or: [{ nationalId }] });
-    if (existingUser) return res.status(400).json({ message: "الرقم القومي مسجل بالفعل" });
-    
-    const idExists = await CivilRegistry.findOne({ nationalId: nationalId });
-    if (!idExists) {
-        return res.status(404).json({ 
-            error: "فشل التسجيل. الرقم القومي غير صحيح." 
+        const familyResults = [];
+        const familyErrors = [];
+
+        if (familyMembers && Array.isArray(familyMembers) && familyMembers.length > 0) {
+            const addedNationalIds = new Set();
+
+            for (const member of familyMembers) {
+                if (!member.fullName || !member.nationalId || !member.gender || !member.relationType) {
+                    familyErrors.push({ member, error: 'بيانات غير مكتملة' });
+                    continue;
+                }
+                if (addedNationalIds.has(member.nationalId)) {
+                    familyErrors.push({ member, error: 'رقم قومي مكرر في نفس الطلب' });
+                    continue;
+                }
+                addedNationalIds.add(member.nationalId);
+
+                try {
+                    let memberUser = await User.findOne({ nationalId: member.nationalId });
+                    if (!memberUser) {
+                        const hashedMemberPassword = await bcrypt.hash(member.nationalId, 10);
+                        const newUserData = {
+                            fullName: member.fullName, password: hashedMemberPassword,
+                            nationalId: member.nationalId, gender: member.gender, religion: member.religion,
+                            region: member.region,
+                            isTempUser: true, isAlive: true
+                        };
+                        if (member.phoneNumber) newUserData.phoneNumber = member.phoneNumber;
+                        memberUser = new User(newUserData);
+                        await memberUser.save();
+                    }
+                    const existingRelation = await FamilyMember.findOne({ userId: user._id, memberUserId: memberUser._id });
+                    if (!existingRelation) {
+                        const memberReligion = member.religion || religion;
+                        const memberNationality = member.nationality || nationality;
+                        const memberRegion = member.region || region;
+
+                        const familyMember = new FamilyMember({
+                            userId: user._id,
+                            memberUserId: memberUser._id,
+                            fullName: member.fullName,
+                            nationalId: member.nationalId,
+                            gender: member.gender,
+                            relationType: member.relationType,
+                            isAlive: true,
+                            religion: memberReligion,
+                            nationality: memberNationality,
+                            region: memberRegion,
+                            phoneNumber: member.phoneNumber || null,
+                        });
+                        await familyMember.save();
+                        familyResults.push({ member, status: 'success' });
+                    } else {
+                        familyResults.push({ member, status: 'already_exists' });
+                    }
+                } catch (innerError) {
+                    console.error("Error processing family member:", innerError);
+                    familyErrors.push({ member, error: innerError.message });
+                }
+            }
+        }
+
+        res.status(201).json({
+            message: "تم إنشاء الحساب بنجاح",
+            user: { id: user._id, fullName: user.fullName, phoneNumber: user.phoneNumber, nationalId: user.nationalId, religion: user.religion },
+            familyResults, familyErrors
         });
+
+    } catch (error) {
+        console.error("Registration error:", error);
+        if (error.code === 11000) {
+            const field = error.keyPattern ? Object.keys(error.keyPattern)[0] : null;
+            if (field === 'phoneNumber') return res.status(400).json({ message: "رقم الهاتف مستخدم بالفعل" });
+            if (field === 'nationalId') return res.status(400).json({ message: "الرقم القومي مسجل بالفعل" });
+        }
+        res.status(500).json({ message: "حدث خطأ أثناء التسجيل، يرجى المحاولة مرة أخرى" });
     }
-
-    const hashedPassword = await bcrypt.hash(password, 10);
-
-    const verificationCode = Math.floor(100000 + Math.random() * 900000).toString();
-
-    const user = new User({
-        fullName,
-        password: hashedPassword,
-        phoneNumber,
-        nationalId,
-        verificationCode
-    });
-
-    await user.save();
-    res.status(201).json({ message: "تم إنشاء الحساب بنجاح" });
 });
+
+router.post('/check-civil-registry', async (req, res) => {
+    try {
+        const { fullName, nationalId, gender, religion, nationality, region } = req.body;
+
+        if (!nationalId) {
+            return res.status(400).json({ message: "الرقم القومي مطلوب" });
+        }
+
+        const civilRecord = await CivilRegistry.findOne({ nationalId });
+        if (!civilRecord) {
+            return res.status(400).json({ message: "الرقم القومي غير موجود في السجل المدني" });
+        }
+
+        const normalize = (str) => str?.trim().normalize('NFKC') || '';
+
+        if (fullName && normalize(civilRecord.fullName) !== normalize(fullName)) {
+            console.log(`❌ FullName mismatch: DB="${civilRecord.fullName}" vs input="${fullName}"`);
+            return res.status(400).json({ message: "الاسم لا يتطابق مع بيانات السجل المدني" });
+        }
+
+        if (gender && normalize(civilRecord.gender) !== normalize(gender)) {
+            console.log(`❌ Gender mismatch: DB="${civilRecord.gender}" vs input="${gender}"`);
+            return res.status(400).json({ message: "الجنس لا يتطابق مع بيانات السجل المدني" });
+        }
+
+        if (religion && normalize(civilRecord.religion) !== normalize(religion)) {
+            console.log(`❌ Religion mismatch: DB="${civilRecord.religion}" vs input="${religion}"`);
+            return res.status(400).json({ message: "الديانة لا تتطابق مع بيانات السجل المدني" });
+        }
+
+        if (nationality && normalize(civilRecord.nationality) !== normalize(nationality)) {
+            console.log(`❌ Nationality mismatch: DB="${civilRecord.nationality}" vs input="${nationality}"`);
+            return res.status(400).json({ message: "الجنسية لا تتطابق مع بيانات السجل المدني" });
+        }
+
+        if (region && normalize(civilRecord.region) !== normalize(region)) {
+            console.log(`❌ Region mismatch: DB="${civilRecord.region}" vs input="${region}"`);
+            return res.status(400).json({ message: "المنطقة لا تتطابق مع بيانات السجل المدني" });
+        }
+
+        const existingUser = await User.findOne({ nationalId, isTempUser: false });
+        if (existingUser) {
+            return res.status(400).json({ message: "الرقم القومي مسجل بالفعل، يرجى تسجيل الدخول" });
+        }
+
+        return res.status(200).json({ message: "البيانات صحيحة" });
+    } catch (error) {
+        console.error("❌ Civil registry check error:", error);
+        res.status(500).json({ message: "حدث خطأ أثناء التحقق، يرجى المحاولة مرة أخرى" });
+    }
+});
+
+router.get('/family-members', authenticateToken, async (req, res) => {
+    try {
+        const familyMembers = await FamilyMember.find({ userId: req.user.id })
+            .sort('-isAlive');
+        
+        res.json({ familyMembers });
+    } catch (error) {
+        console.error('Error fetching family members:', error);
+        res.status(500).json({ message: 'Server error' });
+    }
+});
+
+router.post('/family-members', authenticateToken, async (req, res) => {
+    try {
+        const { fullName, nationalId, gender, relationType, phoneNumber, dateOfBirth } = req.body;
+        
+        if (!fullName || !nationalId || !gender || !relationType) {
+            return res.status(400).json({ message: 'البيانات غير مكتملة' });
+        }
+        
+        const existing = await FamilyMember.findOne({ nationalId });
+        if (existing) {
+            return res.status(400).json({ message: 'الرقم القومي مسجل مسبقاً' });
+        }
+        
+        const familyMember = new FamilyMember({
+            userId: req.user.id,
+            fullName,
+            nationalId,
+            gender,
+            relationType,
+            phoneNumber,
+            dateOfBirth,
+            isAlive: true
+        });
+        
+        await familyMember.save();
+        
+        res.status(201).json({ 
+            message: 'تم إضافة فرد العائلة بنجاح',
+            familyMember 
+        });
+    } catch (error) {
+        console.error('Error adding family member:', error);
+        res.status(500).json({ message: 'Server error' });
+    }
+});
+
 
 router.post('/login', async (req, res) => {
     const { phoneNumber, password } = req.body;
 
-    const user = await User.findOne({ $or: [{ phoneNumber }] });
+    const user = await User.findOne({ phoneNumber });
     if (!user) return res.status(400).json({ message: "User not found" });
+
+    if (!user.isActive || !user.isALive) {
+        return res.status(403).json({ message: "This account has been deactivated. Please contact support." });
+    }
 
     const isMatch = await bcrypt.compare(password, user.password);
     if (!isMatch) return res.status(400).json({ message: "Incorrect password" });
+
 
     const otp = Math.floor(100000 + Math.random() * 900000).toString();
 
@@ -271,10 +456,25 @@ router.get('/get-user/:userId', async (req, res) => {
 
 router.get('/profile', authenticateToken, async (req, res) => {
     try {
-        const user = await User.findById(req.user.id).select('-password -loginOtp');
-        res.json({ user });
+
+        const user = await User.findById(req.user.id)
+            .select('-password -loginOtp');
+
+        const familyMembers = await FamilyMember.find({
+            userId: req.user.id
+        });
+
+        res.json({
+            user,
+            familyMembers
+        });
+
     } catch (error) {
-        res.status(500).json({ message: 'Server error' });
+
+        res.status(500).json({
+            message: 'Server error'
+        });
+
     }
 });
 router.put('/update-profile', authenticateToken, async (req, res) => {
@@ -320,7 +520,6 @@ router.put('/update-profile', authenticateToken, async (req, res) => {
         res.status(500).json({ message: 'حدث خطأ في الخادم' });
     }
 });
-//////////
 router.get('/notifications', authenticateToken, async (req, res) => {
     try {
         const notifications = await Notification.find({ userId: req.user.id })
