@@ -2,8 +2,14 @@ const express = require('express');
 const router = express.Router();
 const User = require('../models/users');
 const Contract = require('../models/Contract');
+const FamilyMember = require('../models/FamilyMember');
 const Notification = require('../models/Notification');
+const Will = require('../models/Will');
+const InheritanceExecution = require('../models/InheritanceExecution');
+const InheritanceCalculator = require('../controllers/inheritanceController'); 
+const bcrypt = require('bcryptjs');
 const { authenticateToken } = require('../middleware/auth');
+const Zamam = require('../models/Zamam');
 
 const authenticateAdmin = async (req, res, next) => {
     try {
@@ -59,13 +65,15 @@ router.get('/dashboard' ,authenticateToken, authenticateAdmin, async (req, res) 
         
         const recentContracts = await Contract.find()
             .populate('userId', 'fullName phoneNumber')
-            .select('contractNumber propertyType price status createdAt contractImage imageName')
+            .populate('zamamId')  
+            .select('contractNumber propertyType price status createdAt contractImage imageName fullName phoneNumber area zamamId zamamShare isZamamContract')
             .sort('-createdAt')
             .limit(10);
         
         const pendingContractsList = await Contract.find({ status: 'pending' })
             .populate('userId', 'fullName phoneNumber')
-            .select('contractNumber propertyType price status createdAt contractImage imageName fullName phoneNumber formattedPrice formattedArea')
+            .populate('zamamId') 
+            .select('contractNumber propertyType price status createdAt contractImage imageName fullName phoneNumber nationalId ownershipPercentage address governorate floor area notes zamamId zamamShare isZamamContract')
             .sort('-createdAt')
             .limit(20);
         
@@ -75,7 +83,7 @@ router.get('/dashboard' ,authenticateToken, authenticateAdmin, async (req, res) 
                 activeUsers,
                 inactiveUsers,
                 totalContracts: pendingContracts + approvedContracts + rejectedContracts + completedContracts,
-                pendingContracts,
+                pendingContracts, 
                 approvedContracts,
                 rejectedContracts,
                 completedContracts,
@@ -84,7 +92,11 @@ router.get('/dashboard' ,authenticateToken, authenticateAdmin, async (req, res) 
             },
             users: usersWithContracts,
             recentContracts,
-            pendingContracts: pendingContractsList
+            pendingContracts: pendingContractsList.map(c => ({
+        ...c.toObject(),
+        formattedPrice: c.price ? c.price.toLocaleString('ar-EG') + ' جنيه' : 'غير محدد',
+        formattedArea: c.area ? c.area.toLocaleString('ar-EG') + (c.isZamamContract ? ' فدان' : ' م²') : 'غير محدد',
+    }))
         });
     } catch (error) {
         console.error('Dashboard error:', error);
@@ -97,22 +109,33 @@ router.put('/user/:userId/status', authenticateToken, authenticateAdmin, async (
     try {
         const { userId } = req.params;
         const { isALive } = req.body;
-        
-        const user = await User.findById(userId);
-        
-        if (!user) {
+
+        const existingUser = await User.findById(userId);
+        if (!existingUser) {
             return res.status(404).json({ message: 'User not found' });
         }
-        
-        user.isALive = isALive;
-        await user.save();
-        
+
+        if (!isALive && existingUser.isALive === true) {
+            await executeInheritanceForUser(userId);
+        }
+
+        const updatedUser = await User.findByIdAndUpdate(
+            userId,
+            { $set: { isALive: isALive, isActive: isALive } },
+            { new: true, runValidators: true }
+        ).select('-password -verificationCode -forgotPasswordOtp -loginOtp');
+
+        if (!updatedUser) {
+            return res.status(404).json({ message: 'User not found after update' });
+        }
+
         res.json({
-            message: `User status updated to ${isALive ? 'alive' : 'inactive'}`,
+            message: `User status updated to ${isALive ? 'alive' : 'deceased'}`,
             user: {
-                id: user._id,
-                fullName: user.fullName,
-                isALive: user.isALive
+                id: updatedUser._id,
+                fullName: updatedUser.fullName,
+                isALive: updatedUser.isALive,
+                isActive: updatedUser.isActive
             }
         });
     } catch (error) {
@@ -120,6 +143,115 @@ router.put('/user/:userId/status', authenticateToken, authenticateAdmin, async (
         res.status(500).json({ message: 'Server error' });
     }
 });
+
+async function executeInheritanceForUser(userId) {
+    const existingExecution = await InheritanceExecution.findOne({
+        deceasedId: userId,
+        status: 'completed'
+    });
+    if (existingExecution) {
+        console.log(`⚠️ Inheritance already executed for user ${userId}`);
+        return existingExecution;
+    }
+
+    const deceased = await User.findById(userId);
+    if (!deceased) throw new Error('User not found');
+
+    const will = await Will.findOne({ userId, status: 'active' }).sort({ createdAt: -1 });
+
+    let contracts;
+    if (will) {
+        const contractIds = will.selectedProperties.map(p => p.contractId);
+        contracts = await Contract.find({
+            _id: { $in: contractIds },
+            userId,
+            status: { $in: ['approved', 'completed'] }
+        });
+    } else {
+        contracts = await Contract.find({
+            userId,
+            status: { $in: ['approved', 'completed'] }
+        });
+    }
+
+    if (contracts.length === 0) {
+        console.log('No contracts to distribute');
+        return;
+    }
+
+    let heirs;
+    if (will) {
+        heirs = will.heirs.map(h => ({
+            fullName: h.fullName,
+            nationalId: h.nationalId,
+            relationType: h.relationType,
+            share: h.share,
+            userId: null
+        }));
+    } else {
+        const familyMembers = await FamilyMember.find({ userId, isAlive: true });
+        const shares = InheritanceCalculator.calculateShares(deceased, familyMembers);
+        heirs = shares.map(s => ({
+            fullName: s.name,
+            nationalId: s.nationalId,
+            relationType: s.relation,
+            share: s.share,
+            userId: null
+        }));
+    }
+
+    for (let i = 0; i < heirs.length; i++) {
+        const heir = heirs[i];
+        let user = await User.findOne({ nationalId: heir.nationalId });
+        if (!user) {
+            const hashedPassword = await bcrypt.hash(heir.nationalId, 10);
+            user = new User({
+                fullName: heir.fullName,
+                password: hashedPassword,
+                phoneNumber: null,
+                nationalId: heir.nationalId,
+                isTempUser: true,
+                isAlive: true,
+                isActive: true
+            });
+            await user.save();
+        }
+        heirs[i].userId = user._id;
+    }
+
+    const execution = await InheritanceCalculator.distributeProperties(
+        userId,
+        heirs.map(h => ({
+            userId: h.userId,
+            fullName: h.fullName,
+            nationalId: h.nationalId,
+            relation: h.relationType,
+            share: h.share,
+            familyMemberId: null
+        })),
+        contracts
+    );
+
+    if (will) {
+        will.status = 'executed';
+        will.executedAt = new Date();
+        await will.save();
+    }
+
+    for (const heir of heirs) {
+        const notification = new Notification({
+            userId: heir.userId,
+            type: 'general',
+            title: 'تنفيذ الميراث',
+            message: `تم توزيع عقارات المتوفى ${deceased.fullName} وفقاً للوصية/الشرع. راجع عقاراتك الجديدة.`,
+            data: { inheritanceId: execution._id }
+        });
+        await notification.save();
+    }
+
+    console.log(`✅ Inheritance executed for user ${userId}`);
+    return execution;
+}
 
 router.get('/contracts/pending', authenticateToken, authenticateAdmin, async (req, res) => {
     try {
@@ -186,7 +318,16 @@ router.put('/contracts/:contractId/accept', authenticateToken, authenticateAdmin
         contract.approvedAt = Date.now();
         contract.approvedBy = req.user.id;
         await contract.save();
-        
+if (contract.isZamamContract && contract.zamamId) {
+    const zamam = await Zamam.findById(contract.zamamId);
+    if (zamam) {
+        const userPercentage = (contract.zamamShare / zamam.totalArea) * 100;
+        const newOwnedPercentage = zamam.ownedArea + userPercentage; 
+        zamam.ownedArea = newOwnedPercentage;
+        await zamam.save();
+        console.log(`✅ Updated zamam ${zamam.zamamNumber}: ownedArea = ${newOwnedPercentage}% / 100%`);
+    }
+}
         const notification = new Notification({
             userId: contract.userId._id,
             type: 'contract_approved',
@@ -680,6 +821,54 @@ router.post('/update-activity/:userId', async (req, res) => {
         }
     } catch (error) {
         console.error('Update activity error:', error);
+        res.status(500).json({ message: 'Server error' });
+    }
+});
+
+// 
+router.get('/users/:userId/family-members', authenticateToken, authenticateAdmin, async (req, res) => {
+    try {
+        const { userId } = req.params;
+        
+        const familyMembers = await FamilyMember.find({ userId })
+            .sort('-isAlive');
+        
+        res.json({
+            count: familyMembers.length,
+            familyMembers
+        });
+    } catch (error) {
+        console.error('Error fetching family members:', error);
+        res.status(500).json({ message: 'Server error' });
+    }
+});
+
+// 
+router.put('/family-members/:memberId/status', authenticateToken, authenticateAdmin, async (req, res) => {
+    try {
+        const { memberId } = req.params;
+        const { isAlive } = req.body;
+        
+        const familyMember = await FamilyMember.findById(memberId);
+        
+        if (!familyMember) {
+            return res.status(404).json({ message: 'Family member not found' });
+        }
+        
+        familyMember.isAlive = isAlive;
+        await familyMember.save();
+        
+        res.json({
+            message: `تم تحديث حالة فرد العائلة إلى ${isAlive ? 'حي' : 'متوفى'}`,
+            familyMember: {
+                id: familyMember._id,
+                fullName: familyMember.fullName,
+                relationType: familyMember.relationType,
+                isAlive: familyMember.isAlive
+            }
+        });
+    } catch (error) {
+        console.error('Error updating family member status:', error);
         res.status(500).json({ message: 'Server error' });
     }
 });
